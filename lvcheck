@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # lvcheck, version 1.0
 #  Maintainer: Bryan Kadzban <bryan@kadzban.is-a-geek.net>
@@ -70,7 +70,7 @@ function on_ac_power() {
 	if [ -d /sys/class/power_supply ] ; then
 		for psu in /sys/class/power_supply/* ; do
 			if [ -r "${psu}/type" ] ; then
-				type="`cat "${psu}/type"`"
+				type="$(cat "${psu}/type")"
 
 				# ignore batteries
 				[ "${type}" = "Battery" ] && continue
