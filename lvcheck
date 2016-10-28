@@ -116,7 +116,7 @@ function try_force_check() {
 	local fstype="$2"
 
 	case "$fstype" in
-	ext2|ext3)
+	ext2|ext3|ext4)
 		tune2fs -C 16000 "$dev"
 		;;
 	xfs)
@@ -134,7 +134,7 @@ function try_delay_checks() {
 	local fstype="$2"
 
 	case "$fstype" in
-	ext2|ext3)
+	ext2|ext3|ext4)
 		tune2fs -C 0 -T now "$dev"
 		;;
 	xfs)
@@ -153,7 +153,7 @@ function try_get_check_date() {
 	local fstype="$2"
 
 	case "$fstype" in
-	ext2|ext3)
+	ext2|ext3|ext4)
 		dumpe2fs -h "$dev" 2>/dev/null | grep 'Last checked:' | \
 				sed -e 's/Last checked:[[:space:]]*//'
 		;;
@@ -172,7 +172,7 @@ function should_still_check() {
 	local fstype="$2"
 
 	case "$fstype" in
-	ext2|ext3)
+	ext2|ext3|ext4)
 		if tune2fs -l "$dev" | grep -q "Journal device" ; then
 			log "warning" "Cowardly refusing to check $dev, which has an external journal."
 			return 1
@@ -189,7 +189,7 @@ function perform_check() {
 	local tmpfile="$3"
 
 	case "$fstype" in
-	ext2|ext3)
+	ext2|ext3|ext4)
 		# first clear the orphaned-inode list, to avoid unnecessary FS changes
 		#  in the next step (which would cause an "error" exit from e2fsck).
 		#  -C 0 is present for cases where  the script is run interactively
