@@ -56,8 +56,8 @@ function log() {
 	local arg=
 
 	# log warning-or-higher messages to stderr as well
-	[ "$sev" == "emerg" -o "$sev" == "alert" -o "$sev" == "crit" -o \
-			"$sev" == "err" -o "$sev" == "warning" ] && arg=-s
+	[ "$sev" == "emerg" ] || [ "$sev" == "alert" ] || [ "$sev" == "crit" ] || \
+			[ "$sev" == "err" ] || [ "$sev" == "warning" ] && arg=-s
 
 	logger -t lvcheck $arg -p user."$sev" -- "$msg"
 }
@@ -75,7 +75,7 @@ function on_ac_power() {
 				# ignore batteries
 				[ "${type}" = "Battery" ] && continue
 
-				online="`cat "${psu}/online"`"
+				online="$(cat "${psu}/online")"
 
 				[ "${online}" = 1 ] && return 0
 				[ "${online}" = 0 ] && any_known=yes
@@ -117,7 +117,7 @@ function try_force_check() {
 
 	case "$fstype" in
 	ext2|ext3|ext4)
-		tune2fs -C 16000 "$dev"
+		$ECHO tune2fs -C 16000 -c 15999 "$dev"
 		;;
 	xfs)
 		# XFS does not enforce check intervals; let email suffice.
@@ -129,19 +129,34 @@ function try_force_check() {
 }
 
 # attempt to set the last-check time on $1 to now, and the mount count to 0.
+# disable the maximum mount count, since we are now checking periodically.
 function try_delay_checks() {
 	local dev="$1"
 	local fstype="$2"
 
 	case "$fstype" in
 	ext2|ext3|ext4)
-		tune2fs -C 0 -T now "$dev"
+		$ECHO tune2fs -C 0 -T now -c -1 "$dev"
 		;;
 	xfs)
 		# XFS does not enforce check intervals; nothing to delay
 		;;
 	*)
 		log "warning" "Don't know how to delay checks on $fstype..."
+		;;
+	esac
+}
+
+# print the date that $1 was last $3, in a format that date(1) will
+#  accept, or "Unknown" if we don't know how to find that date.
+function try_get_date() {
+	local dev="$1"
+	local fstype="$2"
+	local match="$3"
+
+	case "$fstype" in
+	ext2|ext3|ext4)
+		dumpe2fs -h "$dev" 2>/dev/null | sed -ne "s/$match:[[:space:]]*//p"
 		;;
 	esac
 }
@@ -154,8 +169,7 @@ function try_get_check_date() {
 
 	case "$fstype" in
 	ext2|ext3|ext4)
-		dumpe2fs -h "$dev" 2>/dev/null | grep 'Last checked:' | \
-				sed -e 's/Last checked:[[:space:]]*//'
+		try_get_date "$dev" "$fstype" "Last checked"
 		;;
 	*)
 		# XFS does not save the last-checked date
@@ -195,25 +209,26 @@ function perform_check() {
 		#  -C 0 is present for cases where  the script is run interactively
 		#  (logsave -s strips out the progress bar).  ignore the return status
 		#  of this e2fsck, as it doesn't matter.
-		nice logsave -as "${tmpfile}" e2fsck -p -C 0 "$dev"
+		$ECHO nice logsave -as "${tmpfile}" e2fsck -p -C 0 "$dev"
 
 		# then do the real check; -y is here to give more info on any errors
 		#  that may be present on the FS, in the log file.  the snapshot is
 		#  writable, so it shouldn't break anything if e2fsck changes it.
-		nice logsave -as "${tmpfile}" e2fsck -fy -C 0 "$dev"
+		$ECHO nice logsave -as "${tmpfile}" e2fsck -fy -C 0 "$dev"
 		return $?
 		;;
 	reiserfs)
-		echo Yes | nice logsave -as "${tmpfile}" fsck.reiserfs --check "$dev"
+		# shellcheck disable=SC2216 # nice passes stdin to stdout
+		echo Yes | $ECHO nice logsave -as "${tmpfile}" fsck.reiserfs --check "$dev"
 		# apparently can't fail?  let's hope not...
 		return 0
 		;;
 	xfs)
-		nice logsave -as "${tmpfile}" xfs_repair -n "$dev"
+		$ECHO nice logsave -as "${tmpfile}" xfs_repair -n "$dev"
 		return $?
 		;;
 	jfs)
-		nice logsave -as "${tmpfile}" fsck.jfs -fn "$dev"
+		$ECHO nice logsave -as "${tmpfile}" fsck.jfs -fn "$dev"
 		return $?
 		;;
 	*)
@@ -229,19 +244,22 @@ function check_fs() {
 	local fstype="$3"
 	local snapsize="$4"
 
-	local tmpfile=`mktemp -t lvcheck.log.XXXXXXXXXX`
+	local tmpfile
+	tmpfile=$(mktemp -t lvcheck.log.XXXXXXXXXX)
 	local errlog="/var/log/lvcheck-${vg}@${lv}"
 	local snaplvbase="${lv}-lvcheck-temp"
-	local snaplv="${snaplvbase}-`date +'%Y%m%d'`"
+	local snaplv
+	snaplv="${snaplvbase}-$(date +'%Y%m%d')"
 
 	# clean up any left-over snapshot LVs
+	local lvtemp
 	for lvtemp in /dev/${vg}/${snaplvbase}* ; do
 		if [ -e "$lvtemp" ] ; then
 			# Assume the script won't run more than one instance at a time?
 
 			log "warning" "Found stale snapshot $lvtemp: attempting to remove."
 
-			if ! lvremove -f "${lvtemp##/dev}" ; then
+			if ! $ECHO lvremove -f "${lvtemp##/dev}" ; then
 				log "error" "Could not delete stale snapshot $lvtemp"
 				return 1
 			fi
@@ -249,7 +267,7 @@ function check_fs() {
 	done
 
 	# and create this one
-	lvcreate -s -L "${snapsize}M" -n "${snaplv}" "${vg}/${lv}"
+	$ECHO lvcreate -s -L "${snapsize}M" -n "${snaplv}" "${vg}/${lv}"
 
 	if perform_check "/dev/${vg}/${snaplv}" "${fstype}" "${tmpfile}" ; then
 		log "info" "Background scrubbing of /dev/${vg}/${lv} succeeded."
@@ -259,7 +277,7 @@ function check_fs() {
 		try_force_check "/dev/${vg}/${lv}" "$fstype"
 
 		if test -n "$EMAIL"; then
-			mail -s "Fsck of /dev/${vg}/${lv} failed!" $EMAIL < $tmpfile
+			mail -s "Fsck of /dev/${vg}/${lv} failed!" "$EMAIL" < "$tmpfile"
 		fi
 
 		# save the log file in /var/log in case mail is disabled
@@ -272,11 +290,21 @@ function check_fs() {
 	fi
 
 	rm -f "$tmpfile"
-	lvremove -f "${vg}/${snaplv}"
+	$ECHO lvremove -f "${vg}/${snaplv}"
 }
 
+set -e
+
+if [ "$1" = "--dry-run" ]; then
+    ECHO="echo"
+else
+    ECHO=""
+fi
+
 # pull in configuration -- overwrite the defaults above if the file exists
+# shellcheck disable=SC1091
 [ -r /etc/lvcheck.conf ] && . /etc/lvcheck.conf
+[ -r lvcheck.conf ] && . lvcheck.conf
 
 # check whether the machine is on AC power: if not, skip fsck
 on_ac_power || exit 0
@@ -292,44 +320,60 @@ if ! /sbin/dmsetup targets | grep -q snapshot ; then
 fi
 
 # parse up lvscan output
-lvscan 2>&1 | grep ACTIVE | awk '{print $2;}' | \
-while read DEV ; do
-	# remove the single quotes around the device name
-	DEV="`echo "$DEV" | tr -d \'`"
+if [ -z "$DEVICES" ]; then
+	if [ -n "$CHECK_DEVICES" ]; then
+		DEVICES="$CHECK_DEVICES"
+	else
+		DEVICES=$(lvscan 2>&1 | sed -ne "/ACTIVE/{s/Original//;s/Snapshot//;s/.*'\\(\\/dev\\/[^']*\\)'.*/\\1/p}")
+	fi
+fi
+
+for DEV in $DEVICES; do
+	# make sure the device exists
+	if [ ! -b "$DEV" ]; then
+		log "warning" "${DEV} doesn't actually exist; skipping"
+		continue
+	fi
 
 	# get the FS type: blkid prints TYPE="blah"
-	eval `blkid -s TYPE "$DEV" | cut -d' ' -f2`
+	TYPE=""
+	eval "$(blkid -s TYPE "$DEV" | cut -d' ' -f2)"
+
+	if [ -z "$TYPE" ]; then
+		log "warning" "Couldn't determine the filesystem type on ${DEV}; skipping"
+		continue
+	fi
 
 	# see whether this FS needs any extra checks that might disqualify this device
 	should_still_check "$DEV" "$TYPE" || continue
 
 	# get the last-check time
-	check_date=`try_get_check_date "$DEV" "$TYPE"`
+	check_date=$(try_get_check_date "$DEV" "$TYPE")
 
 	# if the date is unknown, run fsck every time the script runs.  sigh.
 	if [ "$check_date" != "Unknown" ] ; then
 		# add $INTERVAL days, and throw away the time portion
-		check_day=`date --date="$check_date $INTERVAL days" +'%Y%m%d'`
+		check_day=$(date --date="$check_date $INTERVAL days" +'%Y%m%d')
 
 		# get today's date, and skip the check if it's not within the interval
-		today=`date +'%Y%m%d'`
-		[ $check_day -gt $today ] && continue
+		today=$(date +'%Y%m%d')
+		[ "$check_day" -gt "$today" ] && continue
 	fi
 
 	# get the volume group and logical volume names
-	VG="`lvs --noheadings -o vg_name "$DEV" | tr -d ' '`"
-	LV="`lvs --noheadings -o lv_name "$DEV" | tr -d ' '`"
+	VG="$(lvs --noheadings -o vg_name "$DEV" | tr -d ' ')"
+	LV="$(lvs --noheadings -o lv_name "$DEV" | tr -d ' ')"
 
 	# get the free space and LV size (in megs), guess at the snapshot
 	#  size, and see how much the admin will let us use (keeping MINFREE
 	#  available)
-	SPACE="`lvs --noheadings --units M --nosuffix -o vg_free "$DEV" | tr -d ' '`"
-	SIZE="`lvs --noheadings --units M --nosuffix -o lv_size "$DEV" | tr -d ' '`"
-	SNAPSIZE="`expr "${SIZE%%.*}" / 500`"
-	AVAIL="`expr "${SPACE%%.*}" - "$MINFREE"`"
+	SPACE="$(lvs --noheadings --units M --nosuffix -o vg_free "$DEV" | tr -d ' ')"
+	SIZE="$(lvs --noheadings --units M --nosuffix -o lv_size "$DEV" | tr -d ' ')"
+	SNAPSIZE="$((${SIZE%%.*} / 500))"
+	AVAIL="$((${SPACE%%.*} - MINFREE))"
 
 	# if we don't even have MINSNAP space available, skip the LV
-	if [ "$MINSNAP" -gt "$AVAIL" -o "$AVAIL" -le 0 ] ; then
+	if [ "$MINSNAP" -gt "$AVAIL" ] || [ "$AVAIL" -le 0 ] ; then
 		log "warning" "Not enough free space on volume group for ${DEV}; skipping"
 		continue
 	fi
